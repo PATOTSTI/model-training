@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Remove-Item -Recurse -Force \"c:\\\\thesis_oil_detection\\\\runs\\\\oil_spill_v1\" -Confirm:$false)",
+      "PowerShell(python -c \"import torch; print\\(torch.__version__\\)\")"
+    ]
+  }
+}

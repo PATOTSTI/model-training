@@ -1,0 +1,11 @@
+# Datasets and results
+/dataset/
+/runs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# VS Code
+.vscode/

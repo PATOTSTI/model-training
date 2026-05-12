@@ -1,0 +1,6 @@
+ultralytics
+roboflow
+torch
+torchvision
+opencv-python
+matplotlib
