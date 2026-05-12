@@ -253,15 +253,15 @@ def train(yaml_path: Path, dated_dir: Path, run_name: str) -> None:
 
     results = model.train(
         data=str(yaml_path),
-        epochs=150,            # ← 150 more on top of V2's 200 completed epochs
+        epochs=250,            # ← fresh start with bigger dataset needs more epochs
         imgsz=640,
         batch=16,
         device=device,
         workers=2,             # ← kept low — safe for your RAM
         cache=False,           # ← kept off — safe for your RAM
-        patience=75,           # ← was 50, gives more room before early stop
+        patience=50,           # ← back to 50, fresh training doesn't need 75
         optimizer='AdamW',
-        lr0=0.0005,            # ← was 0.001, finer tuning at this stage
+        lr0=0.001,             # ← back to 0.001, fresh start needs higher lr
         lrf=0.01,
         momentum=0.937,
         weight_decay=0.0005,
