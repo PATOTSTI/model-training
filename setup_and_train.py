@@ -29,6 +29,11 @@ DATASET_FOLDERS = [
     DATASET / "test"  / "labels",
 ]
 
+# ── V3 config — change these if you want to tweak ─────────────────────────────
+RESUME_WEIGHTS = r"F:\model-training\runs\2026-05-12_20-26-07\oil_detection_v2\weights\last.pt"
+                        # Leave as None to start fresh from yolov8m.pt
+RUN_NAME       = "oil_detection_v3"
+
 # ─────────────────────────────────────────────────────────────────────────────
 def banner(text: str) -> None:
     bar = "─" * 60
@@ -74,8 +79,6 @@ def extract_and_map(zip_path: Path) -> None:
         zf.extractall(tmp_dir)
     print("Extraction complete.")
 
-    # Roboflow zips sometimes nest everything inside one top-level folder.
-    # Unwrap that wrapper if present.
     children = list(tmp_dir.iterdir())
     if len(children) == 1 and children[0].is_dir():
         effective_root = children[0]
@@ -83,12 +86,10 @@ def extract_and_map(zip_path: Path) -> None:
     else:
         effective_root = tmp_dir
 
-    # Walk the extracted tree and map recognised split folders.
     mapped_splits: set[str] = set()
     yaml_src: Path | None = None
 
     for item in effective_root.rglob("*"):
-        # Map split folders (match by folder name, case-insensitive).
         if item.is_dir():
             key = item.name.lower()
             if key in SPLIT_MAP:
@@ -98,9 +99,8 @@ def extract_and_map(zip_path: Path) -> None:
                     shutil.rmtree(dest_split)
                 shutil.copytree(item, dest_split)
                 mapped_splits.add(key.replace("validation", "valid"))
-                continue  # don't descend further into this folder
+                continue
 
-        # Capture the first data.yaml found.
         if item.is_file() and item.name.lower() == "data.yaml" and yaml_src is None:
             yaml_src = item
 
@@ -126,13 +126,14 @@ def fix_data_yaml() -> Path:
     banner("STEP 3 — Writing data.yaml")
 
     yaml_path = DATASET / "data.yaml"
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
     content = (
         f"train: train/images\n"
         f"val:   valid/images\n"
         f"test:  test/images\n"
         f"\n"
         f"nc: 1\n"
-        f"names: ['oil-spill']\n"
+        f"names: ['Oil-spill']\n"   # ← fixed capitalisation to match Roboflow
     )
     yaml_path.write_text(content, encoding="utf-8")
     print(f"data.yaml written to: {yaml_path}")
@@ -219,28 +220,60 @@ def train(yaml_path: Path, dated_dir: Path, run_name: str) -> None:
 
     print()
 
-    print("Loading YOLOv8s base model …")
-    model = YOLO("yolov8s.pt")
+    # ── Load model — resume from last.pt if available, else start fresh ───────
+    if RESUME_WEIGHTS:
+        resume_path = Path(RESUME_WEIGHTS)
+        if resume_path.exists():
+            print(f"Resuming from previous weights: {resume_path}")
+            model_source = str(resume_path)
+        else:
+            print(f"[WARN] RESUME_WEIGHTS path not found: {resume_path}")
+            print("       Falling back to fresh yolov8m.pt weights.")
+            model_source = "yolov8m.pt"
+    else:
+        print("Loading YOLOv8m base model (fresh start) …")
+        model_source = "yolov8m.pt"
+
+    from ultralytics import YOLO
+    model = YOLO(model_source)
 
     print("Launching training with the following config:")
-    print(f"  data    : {yaml_path}")
-    print(f"  epochs  : 100")
-    print(f"  imgsz   : 640")
-    print(f"  batch   : 8")
-    print(f"  device  : {device}")
-    print(f"  workers : 4")
-    print(f"  cache   : True")
-    print(f"  name    : {run_name}")
+    print(f"  data       : {yaml_path}")
+    print(f"  epochs     : 150")
+    print(f"  imgsz      : 640")
+    print(f"  batch      : 16")
+    print(f"  device     : {device}")
+    print(f"  workers    : 2")
+    print(f"  cache      : False")
+    print(f"  patience   : 75")
+    print(f"  optimizer  : AdamW")
+    print(f"  lr0        : 0.0005")
+    print(f"  name       : {run_name}")
     print()
 
     results = model.train(
         data=str(yaml_path),
-        epochs=100,
+        epochs=150,            # ← 150 more on top of V2's 200 completed epochs
         imgsz=640,
-        batch=8,
+        batch=16,
         device=device,
-        workers=4,
-        cache=True,
+        workers=2,             # ← kept low — safe for your RAM
+        cache=False,           # ← kept off — safe for your RAM
+        patience=75,           # ← was 50, gives more room before early stop
+        optimizer='AdamW',
+        lr0=0.0005,            # ← was 0.001, finer tuning at this stage
+        lrf=0.01,
+        momentum=0.937,
+        weight_decay=0.0005,
+        hsv_h=0.015,
+        hsv_s=0.7,
+        hsv_v=0.4,
+        flipud=0.5,
+        fliplr=0.5,
+        mosaic=1.0,
+        degrees=15.0,
+        translate=0.1,
+        scale=0.5,
         project=str(dated_dir),
         name=run_name,
         exist_ok=True,
@@ -254,7 +287,6 @@ def train(yaml_path: Path, dated_dir: Path, run_name: str) -> None:
 
     print(f"  Best model saved to : {best_pt}")
 
-    # mAP50 lives in results.results_dict under 'metrics/mAP50(B)'
     map50 = None
     try:
         rd = results.results_dict
@@ -294,26 +326,20 @@ def rename_best_model(save_dir: Path) -> None:
     best_pt     = weights_dir / "best.pt"
     results_csv = save_dir / "results.csv"
 
-    # ── Locate best.pt ────────────────────────────────────────────────────────
     if not best_pt.exists():
         print(f"[ERROR] best.pt not found at: {best_pt}")
         print("        Check the runs folder manually.")
         return
 
-    # ── Load results.csv ──────────────────────────────────────────────────────
     if not results_csv.exists():
         print(f"[ERROR] results.csv not found at: {results_csv}")
         print("        Cannot rename model without metric values.")
         return
 
     df = pd.read_csv(results_csv)
-
-    # YOLO sometimes pads column names with whitespace — strip them all.
     df.columns = df.columns.str.strip()
-
     last_row = df.iloc[-1]
 
-    # ── Extract mAP50 ─────────────────────────────────────────────────────────
     map50 = None
     for col in ("metrics/mAP50(B)", "metrics/mAP50", "metrics/mAP_50(B)"):
         if col in df.columns:
@@ -325,7 +351,6 @@ def rename_best_model(save_dir: Path) -> None:
         print(f"        Available columns: {list(df.columns)}")
         return
 
-    # ── Extract mAP50-95 ──────────────────────────────────────────────────────
     map50_95 = None
     for col in ("metrics/mAP50-95(B)", "metrics/mAP50-95", "metrics/mAP_50-95(B)"):
         if col in df.columns:
@@ -337,16 +362,13 @@ def rename_best_model(save_dir: Path) -> None:
         print(f"        Available columns: {list(df.columns)}")
         return
 
-    # ── Convert to percentages ────────────────────────────────────────────────
     map50_pct    = round(map50    * 100, 2)
     map50_95_pct = round(map50_95 * 100, 2)
 
-    # ── Build new filename and rename ─────────────────────────────────────────
-    new_name   = f"best_mAP50-{map50_pct}%_mAP50-95-{map50_95_pct}%.pt"
-    new_path   = weights_dir / new_name
+    new_name = f"best_mAP50-{map50_pct}%_mAP50-95-{map50_95_pct}%.pt"
+    new_path = weights_dir / new_name
     os.rename(best_pt, new_path)
 
-    # ── Final summary ─────────────────────────────────────────────────────────
     bar = "=" * 52
     print(bar)
     print("  TRAINING COMPLETE")
@@ -358,9 +380,8 @@ def rename_best_model(save_dir: Path) -> None:
     print(bar)
 
 
-# ── Cleanup: clear dataset folders and optionally runs ────────────────────────
+# ── Cleanup ───────────────────────────────────────────────────────────────────
 def _clear_folder_contents(folder: Path) -> int:
-    """Delete every item inside folder without removing the folder itself."""
     if not folder.exists():
         return 0
     removed = 0
@@ -415,20 +436,15 @@ def clear_dataset_folders() -> None:
         print("         This may affect training accuracy.")
 
 
-# ── Date-stamped run directory + version name ──────────────────────────────────
+# ── Date-stamped run directory ─────────────────────────────────────────────────
 def make_run_info() -> tuple[Path, str]:
-    """Return (dated_project_dir, run_name).
-
-    Each call creates a unique timestamped subfolder inside RUNS_DIR so every
-    training session is isolated:  runs/2026-05-12_15-34-22/detect/oil_spill_v1/
-    """
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dated_dir = RUNS_DIR / timestamp
     dated_dir.mkdir(parents=True, exist_ok=True)
-    return dated_dir, "oil_spill_v1"
+    return dated_dir, RUN_NAME
 
 
-# ── Reset: delete all previous training runs ───────────────────────────────────
+# ── Reset ──────────────────────────────────────────────────────────────────────
 def reset_training_runs() -> None:
     banner("RESET — Clearing Previous Training Runs")
 
@@ -453,12 +469,11 @@ def reset_training_runs() -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # python setup_and_train.py --reset  →  delete all previous runs and exit
     if "--reset" in sys.argv:
         reset_training_runs()
         sys.exit(0)
 
-    banner("YOLOv8 Oil Spill Detection — Setup & Train")
+    banner("YOLOv8 Oil Spill Detection — Setup & Train (V3)")
     print(f"Project root : {ROOT}")
     print(f"Dataset dir  : {DATASET}")
     print()
